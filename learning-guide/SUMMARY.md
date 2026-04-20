@@ -108,3 +108,7 @@ For the full guide, read the chapters in order:
 | [08](08-pros-and-cons.md) | Honest pros, cons, and known gaps |
 | [09](09-real-world-usage.md) | Where to use it, who benefits |
 | [10](10-pitching-autoparallel.md) | How to give a talk about it |
+| [11](11-autoparallel-vs-torchtitan.md) | AutoParallel vs TorchTitan |
+| [12](12-concepts-deep-dive.md) | FX graphs, tracing, joint graphs, addmm (start here if new to PyTorch internals) |
+| [13](13-communication-collectives.md) | Communication collectives from scratch (all-gather, reduce-scatter, all-reduce, all-to-all) |
+| [14](14-questions-for-developers.md) | Questions to ask the AutoParallel developers |

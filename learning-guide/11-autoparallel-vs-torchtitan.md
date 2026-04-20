@@ -22,7 +22,7 @@ You wouldn't ask the engine designer to also build the steering wheel. You would
 ```
 ┌──────────────────────────────────────────────────────────┐
 │                      TorchTitan                          │
-│            (Training Framework / Runtime)                 │
+│            (Training Framework / Runtime)                │
 │                                                          │
 │  ┌─────────────────────────────────────────────────────┐ │
 │  │              AutoParallel                           │ │
@@ -184,8 +184,8 @@ This lets you directly compare AutoParallel's automated decisions against TorchT
                     ─────────────────
 
     ┌─────────────────────────────────────────────┐
-    │              User's Model                    │
-    │           (nn.Module on meta)                │
+    │              User's Model                   │
+    │           (nn.Module on meta)               │
     └──────────────────┬──────────────────────────┘
                        │
            ┌───────────┴───────────┐

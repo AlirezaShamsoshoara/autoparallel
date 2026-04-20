@@ -33,6 +33,8 @@ mesh = DeviceMesh("cuda", torch.arange(32).reshape(4, 8), mesh_dim_names=("dp", 
 
 ## Good to Know
 
+> **New to these concepts?** Chapter [12 — Concepts Deep Dive](12-concepts-deep-dive.md) explains FX graphs, tracing, joint graphs, and `addmm` decomposition from scratch with concrete examples.
+
 ### 5. FX Graphs
 PyTorch FX traces a model into a graph of operations (nodes). Each node has:
 - An `op` type: `placeholder`, `call_function`, `get_attr`, `output`

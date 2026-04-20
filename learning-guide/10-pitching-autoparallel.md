@@ -10,18 +10,18 @@ How to give a compelling talk, presentation, or pitch about AutoParallel.
 
 ```
 ┌────────────────────────────────────────────────────────┐
-│                    AutoParallel                         │
-│     Automatic Model Parallelism via Linear Programming  │
-│                                                         │
-│  INPUT:  nn.Module + DeviceMesh                         │
-│  OUTPUT: Optimally sharded parallel module              │
-│                                                         │
+│                    AutoParallel                        │
+│     Automatic Model Parallelism via Linear Programming │
+│                                                        │
+│  INPUT:  nn.Module + DeviceMesh                        │
+│  OUTPUT: Optimally sharded parallel module             │
+│                                                        │
 │  ✓ FSDP + Tensor Parallelism + Data Parallelism        │
 │  ✓ Globally optimal (ILP solver, not heuristics)       │
 │  ✓ Zero manual parallelism code                        │
 │  ✓ PyTorch-native (DTensor, FX, AOTAutograd)           │
 │  ✓ Runs on meta device (no GPUs needed for planning)   │
-│                                                         │
+│                                                        │
 │  parallel_model = auto_parallel(model, mesh, inputs)   │
 └────────────────────────────────────────────────────────┘
 ```
@@ -138,16 +138,21 @@ parallel_model = auto_parallel(model, mesh, sample_inputs)
 ### The Optimization as a Diagram
 
 ```
-Layer 1:  [R]──┬──[S0]──┬──[R]──┬──[S1]
-               │         │       │
-Layer 2:  [R]──┴──[S0]──┴──[R]──┴──[S1]
-               │         │       │
-Layer N:  [R]──┴──[S0]──┴──[R]──┴──[S1]
+          input   param    bias    output
+          ─────   ─────    ────    ──────
+Layer 1:  [R]─────[S0]─────[R]─────[S1]
+            │       │        │       │
+Layer 2:  [R]─────[S0]─────[R]─────[S1]
+            │       │        │       │
+Layer N:  [R]─────[S0]─────[R]─────[S1]
 
-          input   param   bias    output
-          ──────────────────────────────
-          Each [X] is a placement decision
-          ILP finds the globally optimal set
+  [R]  = Replicate     (full copy on every GPU)
+  [S0] = Shard(0)      (split along dim 0)
+  [S1] = Shard(1)      (split along dim 1)
+
+  Every box is a placement decision.
+  The ILP solver picks the optimal [R], [S0], or [S1]
+  for every tensor across all layers simultaneously.
 ```
 
 ## Demo Script
