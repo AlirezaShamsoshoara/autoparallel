@@ -1138,6 +1138,155 @@ Memory breakdown for a large model:
   With AC:       [params: 35 GB] + [optimizer: 20 GB] + [activations: 15 GB] = 70 GB   ✓ fits!
 ```
 
+## What Is `local_map`?
+
+`local_map` is a PyTorch utility that lets you write a function that operates on **local (already-sharded) tensors** and tell PyTorch what the input and output placements are. It's an escape hatch for operations that AutoParallel can't auto-shard.
+
+### The Problem: Some Ops Can't Be Auto-Sharded
+
+AutoParallel's optimizer has sharding rules for ~30 common operations (matmul, relu, layer norm, etc.). But some operations don't have rules — or the correct sharding requires domain knowledge the optimizer doesn't have. Examples:
+
+- **Context-parallel attention**: Sharding SDPA on the sequence dimension requires knowing that causal masks need special handling
+- **Expert routing in MoE**: Tokens are sent to different experts on different GPUs — the routing logic is model-specific
+- **Custom operations**: Any operation you wrote yourself
+
+For these, you need a way to tell PyTorch: "I know how to shard this. Here's what the inputs and outputs look like. Just trust me."
+
+### How `local_map` Works
+
+`local_map` is a decorator. You annotate a function with the DTensor placements of its inputs and outputs:
+
+```python
+from torch.distributed.tensor.experimental import local_map
+from torch.distributed.tensor.placement_types import Shard, Replicate
+
+@local_map(
+    out_placements=((Shard(0),),),            # output is sharded on dim 0
+    in_placements=((Shard(0),), (Shard(0),)), # both inputs sharded on dim 0
+    redistribute_inputs=True,                  # redistribute inputs if needed
+    device_mesh=mesh,
+)
+def my_custom_op(x, y):
+    # Inside here, x and y are LOCAL tensors (just this GPU's shard)
+    # You write normal single-GPU code
+    return x + y
+```
+
+The key idea: **inside the function, you work with regular tensors** (the local shard on this GPU). **Outside the function, PyTorch sees DTensors** with the placements you declared. `local_map` handles the translation.
+
+### A Visual Walkthrough
+
+Say you have 4 GPUs and a tensor `x` of shape `[1024, 768]` with placement `Shard(0)`:
+
+```
+OUTSIDE local_map (DTensor world):
+  x is a DTensor: shape [1024, 768], placement Shard(0)
+  GPU 0 has x[0:256],  GPU 1 has x[256:512],
+  GPU 2 has x[512:768], GPU 3 has x[768:1024]
+
+         │
+         ▼  local_map unwraps the DTensor
+
+INSIDE local_map (local tensor world):
+  x is a plain tensor: shape [256, 768]  ← just this GPU's shard
+  You write normal PyTorch code as if it's a single GPU
+
+         │
+         ▼  local_map re-wraps the result
+
+OUTSIDE local_map (DTensor world):
+  result is a DTensor with the placement you declared in out_placements
+```
+
+### Real Example: Context-Parallel Attention
+
+From `examples/example_local_map.py` — this shards attention across GPUs on the sequence dimension, the batch dimension, and the head dimension:
+
+```python
+@local_map(
+    out_placements=((Shard(0), Shard(1), Shard(2)),),   # output: shard batch, heads, sequence
+    in_placements=(
+        (Shard(0), Shard(1), Shard(2)),   # query:  shard batch, heads, sequence
+        (Shard(0), Shard(1), Shard(2)),   # key:    shard batch, heads, sequence
+        (Shard(0), Shard(1), Shard(2)),   # value:  shard batch, heads, sequence
+    ),
+    redistribute_inputs=True,
+    device_mesh=mesh,
+)
+def context_parallel_attention(query, key, value):
+    # Inside here: q, k, v are local tensors — just this GPU's slice
+    # of the batch, heads, and sequence
+    out = nn.functional.scaled_dot_product_attention(
+        query=query, key=key, value=value, is_causal=False
+    )
+    return out
+```
+
+Each GPU computes attention on its own slice of the sequence. No all-gather, no all-reduce — each GPU independently computes its portion. This is context parallelism, and AutoParallel can't auto-discover it (SDPA sequence sharding is disabled due to upstream bugs), so `local_map` lets you do it manually.
+
+### Real Example: Sharded Pointwise Op
+
+```python
+@local_map(
+    out_placements=((Shard(0), Shard(0), Replicate()),),
+    in_placements=((Shard(0), Shard(0), Replicate()),),
+    redistribute_inputs=True,
+    device_mesh=mesh,
+)
+def sharded_pointwise(x):
+    return x + 10   # Each GPU adds 10 to its local shard
+```
+
+This tells PyTorch: "the input is sharded on dim 0 across the first two mesh dimensions and replicated on the third. The output has the same placement. The function just adds 10 element-wise." No communication needed.
+
+### How `local_map` Interacts with AutoParallel
+
+When AutoParallel traces a model that uses `local_map`, it treats the `local_map` function as an **opaque block** with known input/output placements:
+
+```
+AutoParallel sees:
+  ... → [node A: Replicate] → [local_map: in=Shard(0), out=Shard(0)] → [node B: ???] → ...
+                                     ▲                      ▲
+                                     │                      │
+                          Placement is fixed         Placement is fixed
+                          (you declared it)          (you declared it)
+```
+
+The optimizer doesn't look inside the `local_map` — it trusts your placement declarations. It **does** optimize the surrounding operations and inserts collectives to redistribute tensors into the placements that your `local_map` expects.
+
+For example, if the node before `local_map` is `Replicate()` but your `local_map` wants `Shard(0)`, AutoParallel will insert a slice (or redistribute) before the call.
+
+### When to Use `local_map`
+
+| Situation | Use `local_map`? |
+|-----------|-----------------|
+| Standard ops (matmul, relu, layer norm) | No — AutoParallel handles these |
+| Context-parallel attention | Yes — auto-sharding is disabled for SDPA sequence dim |
+| MoE expert routing | Yes — token routing is model-specific |
+| Custom CUDA/Triton kernels | Yes — no auto-sharding rules exist |
+| Complex resharding patterns | Yes — when you know the optimal placement |
+
+### `local_map` vs `with_sharding_constraint`
+
+These solve different problems:
+
+| | `local_map` | `with_sharding_constraint` |
+|---|---|---|
+| **Purpose** | Write custom sharded ops | Force a specific placement on a tensor |
+| **What you write** | A function with local tensor code | Nothing — just declares a placement |
+| **Optimizer sees** | Opaque block with fixed placements | A constraint the ILP must respect |
+| **When to use** | Ops the optimizer can't handle | Override optimizer's choice for a specific tensor |
+
+```python
+# with_sharding_constraint: "I want this tensor to be Shard(1) on TP dim"
+x = with_sharding_constraint(x, mesh, (Replicate(), Shard(1)))
+
+# local_map: "Here's a whole function that expects sharded inputs"
+@local_map(out_placements=..., in_placements=..., device_mesh=mesh)
+def my_op(x):
+    return custom_kernel(x)
+```
+
 ## What Is Megatron-LM?
 
 **Megatron-LM** is NVIDIA's library for training large language models. It was one of the first frameworks to show that you could train models with hundreds of billions of parameters by combining multiple parallelism strategies. It's the most well-known alternative to what AutoParallel does — and understanding it helps you understand why AutoParallel exists.
