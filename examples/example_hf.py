@@ -26,6 +26,7 @@ import math
 import time
 
 import torch
+from autoparallel.api import AutoParallel
 from torch.distributed.fsdp import MixedPrecisionPolicy
 from torch.distributed.tensor.placement_types import Replicate, Shard
 from torch.testing._internal.distributed.fake_pg import FakeStore
@@ -35,8 +36,6 @@ from transformers import (
     AutoModelForMaskedLM,
     AutoModelForSeq2SeqLM,
 )
-
-from autoparallel.api import AutoParallel
 
 logging.basicConfig(level=logging.DEBUG)
 

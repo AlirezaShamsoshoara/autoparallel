@@ -1287,6 +1287,136 @@ def my_op(x):
     return custom_kernel(x)
 ```
 
+## What Is SDPA (Scaled Dot-Product Attention)?
+
+SDPA stands for **Scaled Dot-Product Attention**. It's the core mathematical operation inside every Transformer model — the thing that lets the model "pay attention" to different parts of the input.
+
+### The Intuition
+
+Imagine reading a sentence: "The cat sat on the mat because **it** was tired."
+
+What does "it" refer to? To answer that, your brain looks back at every previous word and decides which ones are most relevant. That's attention — each word "attends to" other words to understand context.
+
+In a Transformer, this is done with three vectors for each token:
+- **Query (Q)**: "What am I looking for?"
+- **Key (K)**: "What do I contain?"
+- **Value (V)**: "What information do I carry?"
+
+### The Math
+
+```
+Attention(Q, K, V) = softmax(Q × Kᵀ / √d) × V
+```
+
+Step by step:
+
+```
+1. Q × Kᵀ              Dot product: how much does each query match each key?
+                        Shape: (seq_len, seq_len) — every token scores against every other
+
+2. / √d                 Scale down by √(head_dimension) to prevent huge values
+                        that would make softmax saturate
+
+3. softmax(...)         Convert scores to probabilities (0 to 1, sum to 1)
+                        Each token now has a probability distribution over all other tokens
+
+4. × V                  Weighted sum: combine values using the attention probabilities
+                        Shape: (seq_len, head_dim) — the attention output
+```
+
+### A Visual Example
+
+```
+Input: "The cat sat"     (3 tokens, each has Q, K, V vectors)
+
+Step 1: Q × Kᵀ = attention scores
+                    Key:
+                    The   cat   sat
+  Query:  The  [  0.8   0.1   0.1 ]   "The" mostly attends to itself
+          cat  [  0.3   0.5   0.2 ]   "cat" attends to itself and "The"
+          sat  [  0.2   0.6   0.2 ]   "sat" attends mostly to "cat"
+
+Step 2: Scale by √d (just divides all numbers)
+
+Step 3: Softmax (makes each row sum to 1.0)
+
+Step 4: Multiply by V → weighted combination of value vectors
+        "sat" gets 60% of "cat"'s information + 20% of others
+```
+
+### Multi-Head Attention
+
+Instead of one set of Q, K, V, Transformers use **multiple heads** — each head independently computes attention and then the results are concatenated:
+
+```
+Hidden dim = 768, Heads = 12 → Head dim = 64
+
+Head 0: Q₀, K₀, V₀ → Attention₀ (64 dims)   ← maybe learns syntax
+Head 1: Q₁, K₁, V₁ → Attention₁ (64 dims)   ← maybe learns semantics
+...
+Head 11: Q₁₁, K₁₁, V₁₁ → Attention₁₁ (64 dims)
+
+Concatenate: [Attention₀ | Attention₁ | ... | Attention₁₁] = 768 dims
+```
+
+This is why the code in `example_autoparallel.py` reshapes tensors:
+
+```python
+# (batch, seq_len, hidden) → (batch, heads, seq_len, head_dim)
+q = q.unflatten(-1, (self.nheads, -1)).permute(0, 2, 1, 3)
+```
+
+It splits the hidden dimension into `nheads` groups of `head_dim` each, then rearranges so the heads dimension comes before the sequence dimension (which is what SDPA expects).
+
+### PyTorch's `scaled_dot_product_attention`
+
+PyTorch provides SDPA as a single function call:
+
+```python
+output = torch.nn.functional.scaled_dot_product_attention(query, key, value)
+```
+
+Under the hood, PyTorch picks the fastest implementation for your hardware:
+
+| Backend | When used | Speed |
+|---------|-----------|-------|
+| **FlashAttention** | NVIDIA GPUs (A100, H100) | Fastest — fused CUDA kernel, O(N) memory |
+| **Efficient Attention** | Broader GPU support | Fast — memory-efficient algorithm |
+| **Math fallback** | CPU or unsupported GPU | Slowest — standard PyTorch ops |
+
+FlashAttention is a breakthrough: instead of materializing the full `(seq_len × seq_len)` attention matrix (which is huge for long sequences), it computes attention in tiles, keeping memory usage linear in sequence length instead of quadratic.
+
+### Why SDPA Matters for AutoParallel
+
+SDPA is special in AutoParallel for several reasons:
+
+**1. It has a custom sharding rule** (`propagation_rules.py`): AutoParallel knows that Q, K, V can be sharded on the **heads dimension** — each GPU computes attention for a subset of heads. This is tensor parallelism for attention.
+
+```
+8 GPUs, 48 heads → 6 heads per GPU
+
+GPU 0: SDPA(Q[:,:6,:], K[:,:6,:], V[:,:6,:])   → Attention for heads 0-5
+GPU 1: SDPA(Q[:,6:12,:], K[:,6:12,:], V[:,6:12,:]) → Attention for heads 6-11
+...
+```
+
+**2. Context parallelism is disabled for SDPA**: Sharding on the sequence dimension (dim 2) would require special handling of causal masks. AutoParallel currently filters out `Shard(2)` strategies for SDPA due to upstream PyTorch bugs.
+
+**3. Activation checkpointing targets SDPA**: The attention output is large (`batch × heads × seq_len × head_dim`) and the selective checkpointing policy in `example_autoparallel.py` marks SDPA as `MUST_RECOMPUTE` to save this memory.
+
+**4. SDPA is opaque to decomposition**: AutoParallel preserves SDPA as a single node in the FX graph (doesn't decompose it into Q×K, softmax, ×V). This is because FlashAttention is a fused kernel — decomposing it would lose the performance benefit and create a huge `(seq_len × seq_len)` intermediate tensor.
+
+### Quick Reference
+
+| Term | Meaning |
+|------|---------|
+| **SDPA** | Scaled Dot-Product Attention — the core attention operation |
+| **Q, K, V** | Query, Key, Value — the three input matrices to attention |
+| **Head** | One independent attention computation; models have multiple heads |
+| **Head dim** | hidden_size ÷ num_heads (e.g., 768 ÷ 12 = 64) |
+| **FlashAttention** | Memory-efficient fused CUDA kernel for SDPA |
+| **Causal mask** | Prevents tokens from attending to future tokens (for autoregressive models) |
+
 ## What Is Megatron-LM?
 
 **Megatron-LM** is NVIDIA's library for training large language models. It was one of the first frameworks to show that you could train models with hundreds of billions of parameters by combining multiple parallelism strategies. It's the most well-known alternative to what AutoParallel does — and understanding it helps you understand why AutoParallel exists.

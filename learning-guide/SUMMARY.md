@@ -112,3 +112,4 @@ For the full guide, read the chapters in order:
 | [12](12-concepts-deep-dive.md) | FX graphs, tracing, joint graphs, addmm (start here if new to PyTorch internals) |
 | [13](13-communication-collectives.md) | Communication collectives from scratch (all-gather, reduce-scatter, all-reduce, all-to-all) |
 | [14](14-questions-for-developers.md) | Questions to ask the AutoParallel developers |
+| [15](15-examples.md) | Examples: deep walkthroughs (example_hf.py, more to come) |
